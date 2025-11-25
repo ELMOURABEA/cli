@@ -1,0 +1,108 @@
+name: Sync with Upstream
+
+on:
+  schedule:
+    # Run daily at 4:00 AM UTC
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+    inputs:
+      sync_branch:
+        description: 'Branch to sync (default: main)'
+        required: false
+        default: 'main'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/dependabot/cli.git || true
+          git fetch upstream
+
+      - name: Check for updates
+        id: check
+        run: |
+          BRANCH="${{ github.event.inputs.sync_branch || 'main' }}"
+          LOCAL_SHA=$(git rev-parse origin/$BRANCH)
+          UPSTREAM_SHA=$(git rev-parse upstream/$BRANCH)
+          if [ "$LOCAL_SHA" != "$UPSTREAM_SHA" ]; then
+            echo "has_updates=true" >> $GITHUB_OUTPUT
+            echo "Updates available from upstream"
+          else
+            echo "has_updates=false" >> $GITHUB_OUTPUT
+            echo "Already up to date with upstream"
+          fi
+
+      - name: Create sync branch
+        if: steps.check.outputs.has_updates == 'true'
+        id: sync
+        run: |
+          BRANCH="${{ github.event.inputs.sync_branch || 'main' }}"
+          SYNC_BRANCH="sync/upstream-$(date +%Y%m%d)-${{ github.run_id }}"
+          git checkout -b $SYNC_BRANCH origin/$BRANCH
+          
+          # Attempt merge and capture result
+          if git merge upstream/$BRANCH --no-edit; then
+            echo "merge_status=success" >> $GITHUB_OUTPUT
+          else
+            echo "merge_status=conflict" >> $GITHUB_OUTPUT
+            # Reset to clean state but note the conflict
+            git merge --abort
+            # Create a branch with just the upstream changes for reference
+            git reset --hard origin/$BRANCH
+          fi
+          
+          git push origin $SYNC_BRANCH
+          echo "SYNC_BRANCH=$SYNC_BRANCH" >> $GITHUB_ENV
+          
+          # Get commit log for PR description
+          COMMIT_LOG=$(git log --oneline origin/$BRANCH..upstream/$BRANCH | head -20)
+          echo "COMMIT_LOG<<EOF" >> $GITHUB_ENV
+          echo "$COMMIT_LOG" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Create Pull Request
+        if: steps.check.outputs.has_updates == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="${{ github.event.inputs.sync_branch || 'main' }}"
+          
+          if [ "${{ steps.sync.outputs.merge_status }}" = "conflict" ]; then
+            CONFLICT_NOTE="⚠️ **Note**: Merge conflicts were detected. Manual resolution is required."
+          else
+            CONFLICT_NOTE=""
+          fi
+          
+          gh pr create \
+            --title "Sync with upstream dependabot/cli" \
+            --body "This PR syncs the repository with the latest changes from [dependabot/cli](https://github.com/dependabot/cli).
+
+          $CONFLICT_NOTE
+
+          ## Commits from upstream
+          \`\`\`
+          $COMMIT_LOG
+          \`\`\`
+
+          ## Review
+          Please review the changes and ensure they don't conflict with any fork-specific modifications." \
+            --base $BRANCH \
+            --head $SYNC_BRANCH \
+            --label "sync"
