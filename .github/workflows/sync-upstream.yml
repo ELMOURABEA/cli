@@ -1,0 +1,82 @@
+name: Sync with Upstream
+
+on:
+  schedule:
+    # Run daily at 4:00 AM UTC
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+    inputs:
+      sync_branch:
+        description: 'Branch to sync (default: main)'
+        required: false
+        default: 'main'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/dependabot/cli.git || true
+          git fetch upstream
+
+      - name: Check for updates
+        id: check
+        run: |
+          BRANCH="${{ github.event.inputs.sync_branch || 'main' }}"
+          LOCAL_SHA=$(git rev-parse origin/$BRANCH)
+          UPSTREAM_SHA=$(git rev-parse upstream/$BRANCH)
+          if [ "$LOCAL_SHA" != "$UPSTREAM_SHA" ]; then
+            echo "has_updates=true" >> $GITHUB_OUTPUT
+            echo "Updates available from upstream"
+          else
+            echo "has_updates=false" >> $GITHUB_OUTPUT
+            echo "Already up to date with upstream"
+          fi
+
+      - name: Create sync branch
+        if: steps.check.outputs.has_updates == 'true'
+        run: |
+          BRANCH="${{ github.event.inputs.sync_branch || 'main' }}"
+          SYNC_BRANCH="sync/upstream-$(date +%Y%m%d)"
+          git checkout -b $SYNC_BRANCH origin/$BRANCH
+          git merge upstream/$BRANCH --no-edit || {
+            echo "Merge conflict detected. Manual intervention required."
+            exit 1
+          }
+          git push origin $SYNC_BRANCH
+          echo "SYNC_BRANCH=$SYNC_BRANCH" >> $GITHUB_ENV
+
+      - name: Create Pull Request
+        if: steps.check.outputs.has_updates == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="${{ github.event.inputs.sync_branch || 'main' }}"
+          gh pr create \
+            --title "Sync with upstream dependabot/cli" \
+            --body "This PR syncs the repository with the latest changes from [dependabot/cli](https://github.com/dependabot/cli).
+
+            ## Changes
+            - Merged latest updates from upstream \`$BRANCH\` branch
+            
+            ## Review
+            Please review the changes and ensure they don't conflict with any fork-specific modifications." \
+            --base $BRANCH \
+            --head $SYNC_BRANCH \
+            --label "sync"
