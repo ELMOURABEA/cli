@@ -35,8 +35,9 @@ To manually sync:
 
 This section documents any fork-specific changes:
 
-- Added `sync-upstream.yml` workflow for automated syncing
+- Added `sync-upstream.yml` workflow for automated syncing with conflict detection
 - Enhanced CI workflow with concurrency settings and timeouts
+- Enhanced Smoke workflow with concurrency settings and timeouts
 
 ## Upstream Repository
 
